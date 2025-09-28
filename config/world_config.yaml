@@ -1,0 +1,32 @@
+﻿world_name: "赛博迷雾 MVP"
+
+initial_state:
+  location: "第13区数据黑市"
+  turn_count: 0
+  protagonist_mood: "疲惫且谨慎"
+
+prompts:
+  - id: system_base
+    priority: 100
+    content: "你是一个赛博朋克背景下的AI叙事者。请用冷峻、富有电影感的语言描述场景和行动。"
+
+  - id: current_location
+    priority: 80
+    content: "当前地点：{{ location }}。"
+
+  - id: dynamic_mood
+    priority: 90
+    condition: "turn_count > 0"
+    content: "主角当前的心境：{{ protagonist_mood }}。"
+
+main_workflow:
+  - type: IncrementTurnNode
+
+  - type: GenerateResponseNode
+    params:
+      model: "narrative-llm"
+
+  - type: AsyncUpdateMoodNode
+    params:
+      model: "analyzer-llm"
+      delay: 3

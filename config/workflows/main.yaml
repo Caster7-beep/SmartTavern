@@ -1,0 +1,46 @@
+id: main
+version: 1
+entry: seq_main
+nodes:
+  - id: seq_main
+    type: Sequence
+    children:
+      - inc_turn
+      - build_context
+      - call_llm
+      - post_sf
+      - write_state
+
+  - id: inc_turn
+    type: IncrementCounter
+    params:
+      field: turn_count
+
+  - id: build_context
+    type: Code
+    params:
+      function: select_context
+      outputs: ["messages", "context_slots"]
+
+  - id: call_llm
+    type: LLMChat
+    params:
+      model: "narrative-llm"
+      messages_from: "messages"
+      response_field: "llm_response"
+
+  - id: post_sf
+    type: Subflow
+    subflow:
+      ref: "postprocess@1"
+      input_map:
+        llm_response: input_text
+      output_map:
+        narrative: narrative
+      share_state: true
+
+  - id: write_state
+    type: WriteState
+    params:
+      from_item_map:
+        narrative: last_narrative
