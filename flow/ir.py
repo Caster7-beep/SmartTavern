@@ -1,9 +1,8 @@
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-import yaml
 
 try:
     import jsonschema  # type: ignore
@@ -22,7 +21,7 @@ class IRLoader:
     """
     工作流中间表示（IR）加载器。
     
-    负责从文件系统加载、验证和索引工作流的IR文档（通常是YAML格式）。
+    负责从文件系统加载、验证和索引工作流的IR文档（JSON格式）。
     它使用JSON Schema来确保IR文档的结构正确性，并将加载的流程缓存在内存中以便快速访问。
     """
 
@@ -47,11 +46,8 @@ class IRLoader:
         try:
             with path.open("r", encoding="utf-8") as fh:
                 text = fh.read()
-            # 优先尝试解析JSON，失败则回退到YAML（为开发者提供便利）
-            try:
-                data = json.loads(text)
-            except Exception:
-                data = yaml.safe_load(text) or {}
+            # 仅支持JSON解析
+            data = json.loads(text)
             if not isinstance(data, dict):
                 raise ValueError("IR schema must be a JSON object")
             return data
@@ -60,9 +56,9 @@ class IRLoader:
 
     # -------- Public API --------
 
-    def load_dirs(self, dirs: Iterable[str | Path]) -> int:
+    def load_dirs(self, dirs: Iterable[Union[str, Path]]) -> int:
         """
-        从指定的多个目录中加载所有 .yaml/.yml 文件，并进行验证和索引。
+        从指定的多个目录中加载所有 .json 文件，并进行验证和索引。
         
         Args:
             dirs: 包含目录路径的可迭代对象。
@@ -76,14 +72,12 @@ class IRLoader:
             if not base.exists():
                 logger.info("Skip non-existent IR dir: %s", base)
                 continue
-            for path in base.rglob("*.yml"):
-                count += self._load_file(path)
-            for path in base.rglob("*.yaml"):
+            for path in base.rglob("*.json"):
                 count += self._load_file(path)
         logger.info("IRLoader loaded %d flow(s) from %s", count, ", ".join(map(str, dirs)))
         return count
 
-    def load_file(self, path: str | Path) -> str:
+    def load_file(self, path: Union[str, Path]) -> str:
         """加载单个IR文件，并返回其引用标识（id@version）。"""
         return self._load_file(Path(path))
 
@@ -152,7 +146,7 @@ class IRLoader:
         """加载并注册单个IR文件，处理可能的错误。"""
         try:
             with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh) or {}
+                data = json.load(fh)
             if not isinstance(data, dict):
                 raise IRValidationError(f"IR file must be a mapping root: {path}")
             self.register(data)

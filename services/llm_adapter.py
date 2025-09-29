@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import requests
-import yaml
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,9 @@ class LLMAdapter:
     - Google Gemini generateContent (auto-detected by base_url/endpoint_path)
     """
 
-    def __init__(self, config_path: str = "config/api_config.yaml") -> None:
+    def __init__(self, config_path: str = "config/llm_config.json") -> None:
         self.config_path = Path(config_path)
-        self.secrets_path = Path("config/api_secrets.yaml")
+        self.secrets_path = Path("config/llm_secrets.json")
         self._session = requests.Session()
         self._config = self._load_config()
 
@@ -37,29 +37,29 @@ class LLMAdapter:
         if not self.config_path.exists():
             raise FileNotFoundError(f"LLM API config not found at {self.config_path}")
         with self.config_path.open("r", encoding="utf-8") as stream:
-            base_cfg = yaml.safe_load(stream) or {}
+            base_cfg = json.load(stream)
 
-        # Overlay secrets file if present
+        # Overlay secrets file if present (JSON)
         cfg = dict(base_cfg)
         if self.secrets_path.exists():
             try:
                 with self.secrets_path.open("r", encoding="utf-8") as s:
-                    secrets = yaml.safe_load(s) or {}
+                    secrets = json.load(s)
                 cfg = _deep_merge(cfg, secrets)
                 logger.info("Loaded LLM secrets overlay from %s", self.secrets_path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to read secrets overlay %s: %s", self.secrets_path, exc)
 
-        # Environment variable override for password/api key
-        env_password = (
+        # Environment variable override for api key / bearer token
+        env_cred = (
             os.getenv("SMARTTAVERN_LLM_PASSWORD")
             or os.getenv("LLM_API_KEY")
             or os.getenv("OPENAI_API_KEY")
             or os.getenv("BEARER_TOKEN")
         )
-        if env_password:
-            cfg["password"] = env_password
-            logger.info("LLM password/api_key loaded from environment variable")
+        if env_cred:
+            cfg["api_key"] = env_cred
+            logger.info("LLM api_key loaded from environment variable")
 
         return cfg
 
@@ -171,13 +171,25 @@ class LLMAdapter:
             url = self._gemini_request_url(actual_model)
             payload = self._convert_messages_to_gemini_payload(messages)
             headers = {"Content-Type": "application/json"}
-            # Prefer header style as per official sample cURL
-            api_key = self._config.get("password") or self._config.get("api_key")
+            # Auth handling (supports header/query/bearer)
+            api_key = self._config.get("api_key") or self._config.get("password")
+            auth_cfg: Dict[str, Any] = self._config.get("auth") or {}
+            style = str(auth_cfg.get("style") or "x-goog-api-key").lower()
             if api_key:
-                headers["x-goog-api-key"] = api_key
-                logger.debug("Gemini: using x-goog-api-key header")
+                if style == "query":
+                    param = str(auth_cfg.get("query_param") or "key")
+                    sep = "&" if "?" in url else "?"
+                    url = f"{url}{sep}{param}={api_key}"
+                    logger.debug("Gemini: using query param '%s' for api key", param)
+                elif style == "bearer":
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    logger.debug("Gemini: using Bearer token")
+                else:
+                    header_name = str(auth_cfg.get("header") or "x-goog-api-key")
+                    headers[header_name] = api_key
+                    logger.debug("Gemini: using header '%s' for api key", header_name)
             else:
-                logger.warning("Gemini config detected but no API key found in 'password' or 'api_key'; request may fail")
+                logger.warning("Gemini config detected but no API key found; request may fail")
 
             # Log payload shape (avoid sensitive data)
             try:
@@ -205,12 +217,22 @@ class LLMAdapter:
             "messages": messages,
         }
         headers_oa = {"Content-Type": "application/json"}
-        password = self._config.get("password")
-        if password:
-            headers_oa["Authorization"] = f"Bearer {password}"
+        url_oa = self._request_url()
+        api_key = self._config.get("api_key") or self._config.get("password")
+        auth_cfg: Dict[str, Any] = self._config.get("auth") or {}
+        style = str(auth_cfg.get("style") or "bearer").lower()
+        if api_key:
+            if style == "query":
+                param = str(auth_cfg.get("query_param") or "api_key")
+                sep = "&" if "?" in url_oa else "?"
+                url_oa = f"{url_oa}{sep}{param}={api_key}"
+            elif style == "x-goog-api-key":
+                headers_oa["x-goog-api-key"] = api_key
+            else:
+                headers_oa["Authorization"] = f"Bearer {api_key}"
 
         try:
-            response = self._session.post(self._request_url(), json=payload_oa, headers=headers_oa, timeout=timeout)
+            response = self._session.post(url_oa, json=payload_oa, headers=headers_oa, timeout=timeout)
             response.raise_for_status()
             data = response.json()
             content = self._extract_content(data)

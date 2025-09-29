@@ -26,3 +26,4 @@ logs/
 
 # Secrets (DO NOT COMMIT)
 config/api_secrets.yaml
+config/llm_secrets.json
