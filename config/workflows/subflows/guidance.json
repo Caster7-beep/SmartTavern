@@ -1,0 +1,38 @@
+{
+  "id": "guidance",
+  "version": 1,
+  "entry": "seq",
+  "nodes": [
+    {
+      "id": "seq",
+      "type": "Sequence",
+      "children": ["build_messages", "call_llm", "extract"]
+    },
+    {
+      "id": "build_messages",
+      "type": "Code",
+      "params": {
+        "function": "build_guidance_messages",
+        "outputs": ["messages"]
+      }
+    },
+    {
+      "id": "call_llm",
+      "type": "LLMChat",
+      "params": {
+        "model": "analyzer-llm",
+        "messages_from": "messages",
+        "response_field": "guidance_text"
+      }
+    },
+    {
+      "id": "extract",
+      "type": "Map",
+      "params": {
+        "set": {
+          "guidance": "guidance_text"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "postprocess",
+  "version": 1,
+  "entry": "seq",
+  "nodes": [
+    {
+      "id": "seq",
+      "type": "Sequence",
+      "children": ["normalize"]
+    },
+    {
+      "id": "normalize",
+      "type": "Map",
+      "params": {
+        "set": {
+          "narrative": "input_text"
+        }
+      }
+    }
+  ]
+}

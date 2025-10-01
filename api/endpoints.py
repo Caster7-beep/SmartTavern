@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
 from fastapi import APIRouter, HTTPException
@@ -29,7 +29,7 @@ IR_DIRS = [
 ]
 
 
-def initialize(schema_path: Path | str = Path("schemas") / "ir.schema.json") -> None:
+def initialize(schema_path: Union[Path, str] = Path("schemas") / "ir.schema.json") -> None:
     """Initialize NodeRegistry, IRLoader and FlowExecutor; discover nodes and load IR docs."""
     global _registry, _loader, _executor
     _registry = NodeRegistry()

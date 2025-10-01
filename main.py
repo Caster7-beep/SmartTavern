@@ -6,6 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from api.endpoints import router as api_router, initialize as initialize_api
+from api.chat_endpoints import router as chat_router, initialize as initialize_chat
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -18,8 +19,11 @@ async def lifespan(app: FastAPI):
     try:
         initialize_api()
         logger.info("✅ Flow API 初始化完成")
+        # 初始化 Chat 子系统
+        initialize_chat()
+        logger.info("✅ Chat API 初始化完成")
     except Exception as exc:  # noqa: BLE001
-        logger.error("❌ Flow API 初始化失败: %s", exc, exc_info=True)
+        logger.error("❌ Flow API/Chat 初始化失败: %s", exc, exc_info=True)
         raise
 
     try:
@@ -36,6 +40,7 @@ app = FastAPI(
 )
 
 app.include_router(api_router, prefix="/api")
+app.include_router(chat_router, prefix="/api/chat")
 
 
 @app.get("/")

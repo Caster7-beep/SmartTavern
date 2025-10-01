@@ -1,0 +1,13 @@
+{
+  "base_url": "https://generativelanguage.googleapis.com",
+  "endpoint_path": "",
+  "timeout": 30,
+  "models": {
+    "narrative-llm": "gemini-2.5-flash",
+    "analyzer-llm": "gemini-2.5-flash"
+  },
+  "auth": {
+    "style": "x-goog-api-key",
+    "header": "x-goog-api-key"
+  }
+}
