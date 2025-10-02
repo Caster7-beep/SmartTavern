@@ -3,13 +3,52 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
+import mimetypes
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import RedirectResponse
+
+class PatchedStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        # Force proper MIME types for problematic extensions on Windows
+        try:
+            if path.endswith(".js"):
+                response.media_type = "application/javascript"
+            elif path.endswith(".mjs"):
+                response.media_type = "application/javascript"
+            elif path.endswith(".css"):
+                response.media_type = "text/css"
+            elif path.endswith(".svg"):
+                response.media_type = "image/svg+xml"
+            elif path.endswith(".map"):
+                response.media_type = "application/json"
+        except Exception:
+            # Best-effort; if anything goes wrong, return original response
+            pass
+        return response
 
 from api.endpoints import router as api_router, initialize as initialize_api
 from api.chat_endpoints import router as chat_router, initialize as initialize_chat
+from api.debug_endpoints import router as debug_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Fix incorrect MIME types on Windows (avoid serving .js as text/plain)
+# Ensure both legacy and modern JS MIME types are registered (last one wins).
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
+
+# Fix incorrect MIME types on Windows (avoid serving .js as text/plain)
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 
 @asynccontextmanager
@@ -41,6 +80,19 @@ app = FastAPI(
 
 app.include_router(api_router, prefix="/api")
 app.include_router(chat_router, prefix="/api/chat")
+app.include_router(debug_router, prefix="/api/debug")
+
+# Mount Debug Console static assets (built frontend)
+app.mount(
+    "/debugconsole",
+    PatchedStaticFiles(directory="frontend/dist", html=True),
+    name="debugconsole",
+)
+
+# Convenience redirect to ensure trailing slash (for SPA assets resolution)
+@app.get("/debugconsole")
+def debugconsole_index() -> RedirectResponse:
+    return RedirectResponse(url="/debugconsole/")
 
 
 @app.get("/")

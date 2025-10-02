@@ -10,7 +10,7 @@ from flow.ir import IRLoader
 from flow.executor import FlowExecutor
 from flow.node_base import NodeContext
 from flow.state_manager import StateManager
-from services.code_funcs import build_analyzer_messages, build_guidance_messages
+from services.code_funcs import build_analyzer_messages, build_guidance_messages, derive_status_hp
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def _status_update_job(job: Dict[str, Any]) -> Dict[str, Any]:
     ctx = NodeContext(
         session_id=session_id,
         state=state,
-        resources={"llm": llm_adapter, "code_funcs": {"build_analyzer_messages": build_analyzer_messages}},
+        resources={"llm": llm_adapter, "code_funcs": {"build_analyzer_messages": build_analyzer_messages, "derive_status_hp": derive_status_hp}},
     )
 
     # 2) 准备执行器与加载子流
@@ -64,21 +64,25 @@ def _status_update_job(job: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3) 执行 status_update 子流
     try:
-        result = executor.execute_ref("status_update@1", [{"text": reply_text}], ctx)
+        result = executor.execute_ref("status_update_hp@1", [{"text": reply_text}], ctx)
         items = result.items or [{}]
         first = items[0] if items else {}
-        mood_text = str(first.get("protagonist_mood") or "")
-        if not mood_text:
-            # 回退（保证有值）
-            messages: List[Dict[str, str]] = [{"role": "user", "content": reply_text}]
-            mood_text = llm_adapter.call_model(messages, "analyzer-llm") or "【更新后的心境】保持警惕，但稍微放松了一些"
+        hp_text = str(first.get("status_hp") or "")
+        if not hp_text:
+            # 回退：基于叙事文本推导 HP（演示规则）
+            try:
+                hp_text = derive_status_hp({"text": reply_text}, ctx).get("status_hp", "")  # type: ignore
+            except Exception:
+                hp_text = "90/100"
     except Exception as exc:
-        logger.warning("StatusUpdate subflow failed, fallback to adapter: %s", exc)
-        messages: List[Dict[str, str]] = [{"role": "user", "content": reply_text}]
-        mood_text = llm_adapter.call_model(messages, "analyzer-llm") or "【更新后的心境】保持警惕，但稍微放松了一些"
+        logger.warning("StatusUpdate(HP) subflow failed, fallback to derive: %s", exc)
+        try:
+            hp_text = derive_status_hp({"text": reply_text}, ctx).get("status_hp", "")  # type: ignore
+        except Exception:
+            hp_text = "90/100"
 
     # 4) 写回 LSS
-    _update_session_lss(session_id, {"protagonist_mood": mood_text})
+    _update_session_lss(session_id, {"status_hp": hp_text})
 
     # 5) 解除阻滞并完成回合
     try:
@@ -88,7 +92,7 @@ def _status_update_job(job: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning("StatusUpdate: resolve blockers failed: %s", exc)
 
     return {
-        "updated": {"protagonist_mood": mood_text},
+        "updated": {"status_hp": hp_text},
         "anchor_round": round_no,
         "snapshot_id": snapshot_id,
     }
@@ -134,7 +138,9 @@ def process_job(job: Dict[str, Any]) -> Dict[str, Any]:
                 items = result.items or [{}]
                 first = items[0] if items else {}
                 guidance_text = str(first.get("guidance") or first.get("guidance_text") or "")
-
+                
+                # 将指导文本写回会话 LSS，供下次 Code 节点合入提示
+                _update_session_lss(session_id, {"guidance": guidance_text})
                 return {"ok": True, "type": job_type, "result": {"guidance": guidance_text}}
             except Exception as exc:
                 logger.info("Job(%s) placeholder fallback due to error: %s", job_type, exc)

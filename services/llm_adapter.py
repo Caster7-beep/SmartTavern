@@ -1,10 +1,13 @@
 ﻿import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import requests
 import json
+
+from services.http_traffic import traffic_log
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,8 @@ class LLMAdapter:
     """HTTP adapter with support for:
     - OpenAI-style Chat Completions (default): /v1/chat/completions
     - Google Gemini generateContent (auto-detected by base_url/endpoint_path)
+
+    NOTE: Mock fallback has been DISABLED. All errors will be raised for visibility.
     """
 
     def __init__(self, config_path: str = "config/llm_config.json") -> None:
@@ -189,18 +194,33 @@ class LLMAdapter:
                     headers[header_name] = api_key
                     logger.debug("Gemini: using header '%s' for api key", header_name)
             else:
-                logger.warning("Gemini config detected but no API key found; request may fail")
+                logger.warning("Gemini config detected but no API key found; request will likely fail")
 
             # Log payload shape (avoid sensitive data)
             try:
                 first_content = (payload.get("contents") or [{}])[0]
                 preview = {"has_systemInstruction": "systemInstruction" in payload, "first_content_keys": list(first_content.keys())}
-                logger.info("Gemini request preview: url=%s payload_keys=%s preview=%s", url, list(payload.keys()), preview)
+                logger.info("LLM HTTP → POST %s (Gemini) payload_keys=%s preview=%s", url, list(payload.keys()), preview)
             except Exception:
-                pass
+                logger.info("LLM HTTP → POST %s (Gemini)", url)
 
+            req_id = traffic_log.log_request(service="llm", method="POST", url=url, headers=headers, body=payload)
+            start = time.monotonic()
             try:
                 response = self._session.post(url, json=payload, headers=headers, timeout=timeout)
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                # Log response to traffic
+                try:
+                    traffic_log.log_response(
+                        pair_id=req_id,
+                        status=response.status_code,
+                        headers=dict(response.headers or {}),
+                        body=response.text,
+                        elapsed_ms=elapsed_ms,
+                    )
+                finally:
+                    logger.info("LLM HTTP ← %s (%d ms)", response.status_code, elapsed_ms)
+
                 response.raise_for_status()
                 data = response.json()
                 content = self._extract_gemini_text(data)
@@ -208,8 +228,17 @@ class LLMAdapter:
                     return content
                 raise ValueError("Gemini response missing candidates/content text")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Gemini call failed for model %s: %s; falling back to mock response", actual_model, exc)
-                return self._mock_response(messages, model_name)
+                status = None
+                body_text = ""
+                try:
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if getattr(exc, "response", None) is not None:
+                        body_text = getattr(exc.response, "text", "")  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                traffic_log.log_error(pair_id=req_id, error=f"{type(exc).__name__}: {exc} {body_text}", status=status)
+                logger.error("Gemini call failed for model %s: %s", actual_model, exc, exc_info=True)
+                raise
 
         # Default OpenAI-style Chat Completions
         payload_oa: Dict[str, Any] = {
@@ -231,17 +260,41 @@ class LLMAdapter:
             else:
                 headers_oa["Authorization"] = f"Bearer {api_key}"
 
+        logger.info("LLM HTTP → POST %s (OpenAI-like)", url_oa)
+        req_id = traffic_log.log_request(service="llm", method="POST", url=url_oa, headers=headers_oa, body=payload_oa)
+        start = time.monotonic()
         try:
             response = self._session.post(url_oa, json=payload_oa, headers=headers_oa, timeout=timeout)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            try:
+                traffic_log.log_response(
+                    pair_id=req_id,
+                    status=response.status_code,
+                    headers=dict(response.headers or {}),
+                    body=response.text,
+                    elapsed_ms=elapsed_ms,
+                )
+            finally:
+                logger.info("LLM HTTP ← %s (%d ms)", response.status_code, elapsed_ms)
+
             response.raise_for_status()
             data = response.json()
             content = self._extract_content(data)
             if content:
                 return content
             raise ValueError("LLM response missing message content")
-        except Exception as exc:  # noqa: BLE001 - fallback is intentional here
-            logger.warning("LLM call failed for model %s: %s; falling back to mock response", actual_model, exc)
-            return self._mock_response(messages, model_name)
+        except Exception as exc:  # noqa: BLE001
+            status = None
+            body_text = ""
+            try:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if getattr(exc, "response", None) is not None:
+                    body_text = getattr(exc.response, "text", "")  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            traffic_log.log_error(pair_id=req_id, error=f"{type(exc).__name__}: {exc} {body_text}", status=status)
+            logger.error("LLM call failed for model %s: %s", actual_model, exc, exc_info=True)
+            raise
 
     @staticmethod
     def _extract_content(data: Mapping[str, Any]) -> Optional[str]:
@@ -256,6 +309,7 @@ class LLMAdapter:
         except Exception:  # noqa: BLE001
             return None
 
+    # Kept for compatibility with old tests, but no longer used in call_model
     def _mock_response(self, messages: List[Dict[str, str]], model_name: str) -> str:
         system_prompt = next((msg["content"] for msg in messages if msg.get("role") == "system"), "")
         if model_name == "narrative-llm":

@@ -1,0 +1,17 @@
+{
+  "id": "status_update_hp",
+  "version": 1,
+  "entry": "seq",
+  "nodes": [
+    {
+      "id": "seq",
+      "type": "Sequence",
+      "children": ["derive"]
+    },
+    {
+      "id": "derive",
+      "type": "Code",
+      "params": { "function": "derive_status_hp", "outputs": ["status_hp"] }
+    }
+  ]
+}

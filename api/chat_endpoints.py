@@ -16,6 +16,7 @@ from services.job_queue_interface import get_default_job_queue, JobQueue, JobTyp
 from services.job_queue_rq import get_rq_job_queue
 from services.job_worker import process_job
 from services.outbox_poller import start_outbox_poller
+from services.code_funcs import select_context
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ async def chat_send(request: ChatSendRequest) -> ChatSendResponse:
     )
 
     # 构建 NodeContext
-    resources: Dict[str, Any] = {"llm": llm_adapter}
+    resources: Dict[str, Any] = {"llm": llm_adapter, "code_funcs": {"select_context": select_context}}
     if request.resources and isinstance(request.resources, dict):
         # 白名单覆盖
         for k in ("llm", "code", "code_funcs"):
@@ -169,7 +170,7 @@ async def chat_send(request: ChatSendRequest) -> ChatSendResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("chat_send flow failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Flow execution failed") from exc
+        raise HTTPException(status_code=500, detail=f"Flow execution failed: {type(exc).__name__}: {exc}") from exc
 
     final_items = result.items or [{}]
     first = final_items[0] if final_items else {}
@@ -194,7 +195,7 @@ async def chat_send(request: ChatSendRequest) -> ChatSendResponse:
         "type": JobType.STATUS_UPDATE,
         "base_range_end": turn_count,  # 使用 0..turn_count 的区间作为依赖范围
         "gating": True,
-        "payload": {"text": llm_reply},
+        "payload": {"text": llm_reply, "user_input": request.user_input},
     }
     job_id = _store.record_job(
         session_id=request.session_id,
@@ -210,8 +211,8 @@ async def chat_send(request: ChatSendRequest) -> ChatSendResponse:
 
     # 标记当前回合阻滞（直到状态更新完成）
     _store.set_round_blockers(request.session_id, branch_id, round_no, keys=["gating"])
-
-    # 入队（如果队列可用），并标记 Outbox 已投递
+ 
+    # 入队（如果队列可用），并标记 Outbox 已投递（阻滞式：状态更新）
     try:
         assert _job_queue is not None
         hint = _job_queue.worker_hint()
@@ -226,6 +227,42 @@ async def chat_send(request: ChatSendRequest) -> ChatSendResponse:
             logger.info("chat_send: gating job enqueued=%s", queue_job_id)
     except Exception as exc:
         logger.warning("chat_send: enqueue/execute gating job failed: %s", exc)
+ 
+    # 非阻滞作业：生成幕后指导（LLM-3），完成后写入 LSS.gudance，供下次提示合入
+    try:
+        assert _job_queue is not None
+        guidance_job_id = _store.record_job(
+            session_id=request.session_id,
+            job_type=JobType.GUIDANCE,
+            branch_id=branch_id,
+            anchor_round=round_no,
+            base_range_end=turn_count,
+            gating=False,
+            payload={"text": llm_reply},
+            snapshot_id=snapshot_id,
+        )
+        guidance_payload = {
+            "id": guidance_job_id,
+            "session_id": request.session_id,
+            "branch_id": branch_id,
+            "anchor_round": round_no,
+            "snapshot_id": snapshot_id,
+            "type": JobType.GUIDANCE,
+            "base_range_end": turn_count,
+            "gating": False,
+            "payload": {"text": llm_reply},
+        }
+        hint2 = _job_queue.worker_hint()
+        if hint2 == "null":
+            result_obj2 = process_job(guidance_payload)
+            _store.update_job_status(request.session_id, guidance_job_id, status="completed", result=result_obj2)
+            logger.info("chat_send: executed guidance job synchronously (null queue)")
+        else:
+            queue_job_id2 = _job_queue.enqueue(guidance_payload)
+            _store.mark_job_enqueued(request.session_id, guidance_job_id)
+            logger.info("chat_send: guidance job enqueued=%s", queue_job_id2)
+    except Exception as exc:
+        logger.warning("chat_send: enqueue/execute guidance job failed: %s", exc)
 
     # 更新会话 LSS 与 turn_count（由工作流中 IncrementCounter 写入到 state）
     state_snapshot = state.get_working_state()
@@ -263,6 +300,7 @@ class RoundStatusResponse(BaseModel):
     round_no: int
     status: str
     blockers: List[str]
+    state_snapshot: Dict[str, Any]
 
 
 class RerollRequest(BaseModel):
@@ -295,7 +333,7 @@ class BranchResponse(BaseModel):
     branch_id: str
 
 
-@router.get("/round/{session_id}/{branch_id}/{round_no}/status", response_model=RoundStatusResponse, summary="查询回合阻滞与状态")
+@router.get("/round/{session_id}/{branch_id}/{round_no}/status", response_model=RoundStatusResponse, summary="查询回合阻滞与状态（附当前会话 LSS 快照）")
 async def chat_round_status(session_id: str, branch_id: str, round_no: int) -> RoundStatusResponse:
     _require_ready()
     assert _store is not None
@@ -303,10 +341,14 @@ async def chat_round_status(session_id: str, branch_id: str, round_no: int) -> R
         data = _store.get_round(session_id, branch_id, int(round_no))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="round not found")
+    # 读取当前会话 LSS（用于前端在阻滞解除后及时看到状态更新）
+    sess = _store.load_session(session_id)
+    lss_snapshot = dict(sess.get("lss_state_json") or {})
     return RoundStatusResponse(
         round_no=int(data.get("round_no", round_no)),
         status=str(data.get("status") or "open"),
         blockers=list(data.get("blockers") or []),
+        state_snapshot=lss_snapshot,
     )
 
 
@@ -354,7 +396,7 @@ async def chat_round_reroll(request: RerollRequest) -> RerollResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("chat_round_reroll flow failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Flow execution failed") from exc
+        raise HTTPException(status_code=500, detail=f"Flow execution failed: {type(exc).__name__}: {exc}") from exc
 
     final_items = result.items or [{}]
     first = final_items[0] if final_items else {}
